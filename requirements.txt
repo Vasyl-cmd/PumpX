@@ -2,3 +2,4 @@ ccxt
 requests
 pandas
 python-dotenv
+python-telegram-bot==20.8
