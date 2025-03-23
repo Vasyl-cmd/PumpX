@@ -1,0 +1,18 @@
+# Bytecode files
+__pycache__/
+*.py[cod]
+
+# Директории виртуальных окружений
+venv/
+.env/
+
+# Логи
+*.log
+
+# Файлы IDE
+.idea/
+.vscode/
+
+# Системные файлы
+.DS_Store
+Thumbs.db
