@@ -4,6 +4,11 @@ import logging
 import pandas as pd
 import requests
 from datetime import datetime, timedelta, timezone
+from dotenv import load_dotenv
+import os
+
+# Загрузка переменных окружения из .env файла
+load_dotenv()
 
 # Настройки логирования
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -12,8 +17,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 bybit = ccxt.bybit({'options': {'defaultType': 'future'}})
 
 # Телеграм API
-TELEGRAM_BOT_TOKEN = "7913216420:AAHvkdJB9Gx7wktl5DFkGrvvlhBsz8rdTNU"
-TELEGRAM_CHAT_ID = "359242722"
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # Настройки бота
 timeframe_minutes = 20  # Время в минутах
