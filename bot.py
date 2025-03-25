@@ -3,12 +3,7 @@ import time
 import logging
 import pandas as pd
 import requests
-from datetime import datetime, timedelta, timezone
-from dotenv import load_dotenv
-import os
-
-# Загрузка переменных окружения из .env файла
-load_dotenv()
+from datetime import datetime, timezone, timedelta
 
 # Настройки логирования
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -17,16 +12,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 bybit = ccxt.bybit({'options': {'defaultType': 'future'}})
 
 # Телеграм API
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_BOT_TOKEN = "ТВОЙ_ТОКЕН"
+TELEGRAM_CHAT_ID = "ТВОЙ_ЧАТ_ID"
 
 # Настройки бота
-timeframe_minutes = 20  # Время в минутах
-percent_threshold = 5  # Процент пампа/дампа
+timeframe_minutes = 20  # Время анализа (в минутах)
+percent_threshold = 2  # Процент изменения цены для сигнала
+pump_block_time = timedelta(minutes=15)  # Блокировка повторных сигналов
 
-# Хранение количества сигналов за 24 часа
-signal_counts = {}
-last_reset_time = datetime.now(timezone.utc)  # Исправленный код
+# Хранение времени последнего пампа/дампа по каждой монете
+last_signal_time = {}
 
 def send_telegram_message(message):
     """Отправка сообщения в Telegram"""
@@ -42,27 +37,25 @@ def send_telegram_message(message):
     except Exception as e:
         logging.error(f"❌ Ошибка при отправке в Telegram: {e}")
 
-# Отправка сообщения при запуске с настройками бота
+# Отправка сообщения при запуске
 startup_message = (
     f"🚀 Бот запущен и отслеживает пампы/дампы!\n"
-    f"⏱️ Время: {timeframe_minutes} минут\n"
-    f"📊 Процент: {percent_threshold}%"
+    f"⏱️ Время анализа: {timeframe_minutes} минут\n"
+    f"📊 Процент изменения: {percent_threshold}%"
 )
 send_telegram_message(startup_message)
 
-# Функция получения списка фьючерсных пар с Bybit
 def get_futures_symbols():
+    """Получение списка фьючерсных пар с Bybit"""
     all_coins = []
 
     try:
         bybit_markets = bybit.load_markets()
 
         bybit_coins = [
-            (symbol.replace('/', '').split(':')[0], 'Bybit')  # Убираем слэш и всё после двоеточия
+            (symbol.replace('/', '').split(':')[0], 'Bybit')  
             for symbol, data in bybit_markets.items()
-            if symbol.endswith('USDT')  
-            and data.get('active', False)  
-            and 'swap' in data.get('type', '')  
+            if symbol.endswith('USDT') and data.get('active', False) and 'swap' in data.get('type', '')  
         ]
 
         logging.info(f"✅ Найдено {len(bybit_coins)} фьючерсных пар с Bybit.")
@@ -72,17 +65,10 @@ def get_futures_symbols():
 
     return all_coins
 
-# Функция анализа пампа/дампа
 def check_pump_dump(symbol, exchange_name):
-    global last_reset_time, signal_counts
-
+    """Анализ пампа/дампа"""
     try:
-        # Сброс счетчика сигналов каждые 24 часа
-        if datetime.now(timezone.utc) - last_reset_time > timedelta(hours=24):  # Исправленный код
-            signal_counts.clear()
-            last_reset_time = datetime.now(timezone.utc)  # Исправленный код
-            logging.info("🔄 Сброс счетчика сигналов за 24 часа.")
-
+        now = datetime.now(timezone.utc)
         ohlcv = bybit.fetch_ohlcv(symbol, timeframe='1m', limit=21)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 
@@ -94,35 +80,58 @@ def check_pump_dump(symbol, exchange_name):
         last_price = df.iloc[-1]['close']
         percent_change = ((last_price - first_price) / first_price) * 100
 
-        logging.info(f"📊 {symbol} ({exchange_name}): {percent_change:.2f}% за {timeframe_minutes} минут")
+        # Рассчитываем объем за последние 20 минут
+        volume_first = df.iloc[-21:-1]['volume'].sum()
+        volume_last = df.iloc[-20:]['volume'].sum()
 
-        # Увеличение счетчика сигналов для монеты
-        signal_counts[symbol] = signal_counts.get(symbol, 0) + 1
+        if volume_first == 0:
+            volume_ratio = 0  # Избегаем деления на ноль
+        else:
+            volume_ratio = volume_last / volume_first
+
+        logging.info(f"📊 {symbol} ({exchange_name}): {percent_change:.2f}% за {timeframe_minutes} минут")
+        logging.info(f"📊 {symbol} ({exchange_name}): объем вырос в {volume_ratio:.2f} раз за последние 20 минут")
+
+        # Проверка блокировки на повторный сигнал
+        if symbol in last_signal_time and now - last_signal_time[symbol] < pump_block_time:
+            logging.info(f"⏳ Пропускаем {symbol} (ещё не прошло 15 минут с последнего сигнала)")
+            return  
+
+        # Фиксируем новое время сигнала
+        last_signal_time[symbol] = now  
 
         # Формируем ссылку на CoinGlass
         coinglass_url = f"https://www.coinglass.com/tv/Bybit_{symbol.replace('USDT', 'USDT')}"
 
+        # Форматируем цены
+        first_price_formatted = f"{first_price:.6f}".rstrip('0').rstrip('.')
+        last_price_formatted = f"{last_price:.6f}".rstrip('0').rstrip('.')
+
+        # Оповещения при достижении порога изменения цены
         if percent_change >= percent_threshold:
             message = (
                 f"🚀 <b><a href='{coinglass_url}'>{symbol} ({exchange_name})</a></b> <b>Памп: {percent_change:.2f}%</b>\n"
-                f"🕒 {timeframe_minutes} минут ( {first_price:.4f} → {last_price:.4f} )\n"
-                f"📢 Signal 24h: {signal_counts[symbol]}"
+                f"🕒 {timeframe_minutes} минут ( {first_price_formatted} → {last_price_formatted} )\n"
+                f"📊 Объем вырос в {volume_ratio:.2f} раз"
             )
             send_telegram_message(message)
+
         elif percent_change <= -percent_threshold:
             message = (
                 f"🔻 <b><a href='{coinglass_url}'>{symbol} ({exchange_name})</a></b> <b>Дамп: {percent_change:.2f}%</b>\n"
- f"🕒 {timeframe_minutes} минут ( {first_price:.4f} → {last_price:.4f} )\n"
-                f"📢 Signal 24h: {signal_counts[symbol]}"
+                f"🕒 {timeframe_minutes} минут ( {first_price_formatted} → {last_price_formatted} )\n"
+                f"📊 Объем вырос в {volume_ratio:.2f} раз"
             )
             send_telegram_message(message)
 
     except Exception as e:
         logging.error(f"❌ Ошибка при анализе {symbol} ({exchange_name}): {e}")
 
-# Запуск цикла проверки
+# Запуск основного цикла
 try:
     while True:
+        now = datetime.now(timezone.utc)
+
         futures_pairs = get_futures_symbols()
         logging.info(f"📢 Отслеживаем {len(futures_pairs)} пар")
 
@@ -133,8 +142,8 @@ try:
 
 except KeyboardInterrupt:
     logging.info("❌ Бот остановлен пользователем.")
-    send_telegram_message("❌ Бот был остановлен пользователем.")  # Оповещение о завершении работы бота
+    send_telegram_message("❌ Бот был остановлен пользователем.")
 
 except Exception as e:
     logging.error(f"❌ Ошибка в основном цикле: {e}")
-    send_telegram_message(f"❌ Ошибка в основном цикле: {e}")  # Оповещение о возникшей ошибке
+    send_telegram_message(f"❌ Ошибка в основном цикле: {e}")
